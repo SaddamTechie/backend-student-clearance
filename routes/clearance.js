@@ -53,8 +53,8 @@ router.put('/approve/:requestId', async (req, res) => {
     student.clearanceStatus[request.department] = status;
     await student.save();
 
-    // Notify student
-    sendEmail(student.email, `${request.department} Clearance ${status}`, `Your ${request.department} clearance has been ${status}.`);
+    // Notify student (Will Implement later - No email service provider)
+    //sendEmail(student.email, `${request.department} Clearance ${status}`, `Your ${request.department} clearance has been ${status}.`);
 
     // Check if all cleared
     const allCleared = Object.values(student.clearanceStatus).every(s => s === 'approved');
@@ -62,7 +62,7 @@ router.put('/approve/:requestId', async (req, res) => {
       student.certificateGenerated = true;
       await student.save();
       const pdfPath = await generateCertificate(student);
-      sendEmail(student.email, 'Clearance Certificate', 'Attached is your clearance certificate.', pdfPath);
+      //sendEmail(student.email, 'Clearance Certificate', 'Attached is your clearance certificate.', pdfPath);
     }
 
     res.json({ message: `Request ${status}`, student });
@@ -91,6 +91,17 @@ router.get('/status/:studentId', async (req, res) => {
     const student = await Student.findOne({ studentId: req.params.studentId });
     if (!student) return res.status(404).json({ message: 'Student not found' });
     res.json(student.clearanceStatus);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+
+router.get('/request', async (req, res) => {
+  // const { department } = req.query;
+  try {
+    const requests = await Request.find({ department:'finance', status: 'pending' });
+    res.json(requests);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }

@@ -1,10 +1,12 @@
 const express = require('express');
 const mongoose = require('mongoose');
+const cors = require('cors');
 const clearanceRoutes = require('./routes/clearance');
 require('dotenv').config();
 
 const app = express();
 app.use(express.json());
+app.use(cors());
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGO_URI)
