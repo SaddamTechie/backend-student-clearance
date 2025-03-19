@@ -32,7 +32,7 @@ router.post('/request', async (req, res) => {
     await request.save();
 
     // Notify student
-    sendEmail(student.email, `${department} Clearance Requested`, 'Your clearance request is pending approval.');
+    //sendEmail(student.email, `${department} Clearance Requested`, 'Your clearance request is pending approval.');
     res.status(201).json({ message: 'Request submitted', request });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -88,9 +88,29 @@ router.get('/qr/:studentId', async (req, res) => {
 // Get Clearance Status
 router.get('/status/:studentId', async (req, res) => {
   try {
-    const student = await Student.findOne({ studentId: req.params.studentId });
+    const studentId = req.params.studentId;
+    const student = await Student.findOne({ studentId });
     if (!student) return res.status(404).json({ message: 'Student not found' });
-    res.json(student.clearanceStatus);
+    // Fetch all requests for the student
+    const requests = await Request.find({ studentId });
+    const departments = ['finance', 'library', 'department', 'hostel', 'administration'];
+    const status = {};
+    const requestsSent = {};
+
+    // Initialize status and requestsSent
+    departments.forEach((department) => {
+      status[department] = 'pending'; // Default status
+      requestsSent[department] = false;
+    });
+
+    // Update status and requestsSent based on existing requests
+    requests.forEach((request) => {
+      status[request.department] = request.status;
+      requestsSent[request.department] = true;
+    });
+
+    // If a student has no requests, status remains 'pending' by default
+    res.send({ status, requestsSent });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -100,7 +120,7 @@ router.get('/status/:studentId', async (req, res) => {
 router.get('/request', async (req, res) => {
   // const { department } = req.query;
   try {
-    const requests = await Request.find({ department:'finance', status: 'pending' });
+    const requests = await Request.find({ department:'library'});
     res.json(requests);
   } catch (err) {
     res.status(500).json({ message: err.message });
