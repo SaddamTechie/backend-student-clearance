@@ -5,10 +5,45 @@ const Request = require('../models/Request');
 const qrcode = require('qrcode');
 const { sendEmail } = require('../utils/notifications');
 const { generateCertificate } = require('../utils/pdfGenerator');
+const jwt = require('jsonwebtoken');
+const dotenv = require('dotenv');
+dotenv.config();
+
+const secret = process.env.SECRET_KEY;
+
+// Login (simple email-based login for now)
+router.post('/login', async (req, res) => {
+  const { email } = req.body;
+  try {
+    const student = await Student.findOne({ email });
+    if (!student) return res.status(404).json({ message: 'Student not found' });
+
+    const token = jwt.sign({ studentId: student.studentId }, secret, { expiresIn: '1h' });
+    res.json({ token, studentId: student.studentId });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Middleware to verify token (add this above other routes requiring auth)
+const authMiddleware = (req, res, next) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.status(401).json({ message: 'No token provided' });
+
+  try {
+    const decoded = jwt.verify(token,secret);
+    req.studentId = decoded.studentId;
+    next();
+  } catch (err) {
+    res.status(401).json({ message: 'Invalid token' });
+  }
+};
+
 
 // Register Student
 router.post('/register', async (req, res) => {
   const { studentId, name, email } = req.body;
+  console.log(req.body);
   try {
     let student = await Student.findOne({ studentId });
     if (student) return res.status(400).json({ message: 'Student already exists' });
@@ -22,7 +57,7 @@ router.post('/register', async (req, res) => {
 });
 
 // Submit Clearance Request
-router.post('/request', async (req, res) => {
+router.post('/request',authMiddleware, async (req, res) => {
   const { studentId, department } = req.body;
   try {
     const student = await Student.findOne({ studentId });
@@ -40,7 +75,7 @@ router.post('/request', async (req, res) => {
 });
 
 // Approve/Reject Request
-router.put('/approve/:requestId', async (req, res) => {
+router.put('/approve/:requestId',authMiddleware, async (req, res) => {
   const { status } = req.body; // 'approved' or 'rejected'
   try {
     const request = await Request.findById(req.params.requestId);
@@ -72,7 +107,7 @@ router.put('/approve/:requestId', async (req, res) => {
 });
 
 // Get QR Code
-router.get('/qr/:studentId', async (req, res) => {
+router.get('/qr/:studentId',authMiddleware, async (req, res) => {
   try {
     const student = await Student.findOne({ studentId: req.params.studentId });
     if (!student) return res.status(404).json({ message: 'Student not found' });
@@ -86,7 +121,7 @@ router.get('/qr/:studentId', async (req, res) => {
 });
 
 // Get Clearance Status
-router.get('/status/:studentId', async (req, res) => {
+router.get('/status/:studentId',authMiddleware, async (req, res) => {
   try {
     const studentId = req.params.studentId;
     const student = await Student.findOne({ studentId });
