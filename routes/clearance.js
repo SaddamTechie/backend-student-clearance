@@ -1,41 +1,63 @@
 const express = require('express');
 const router = express.Router();
 const Student = require('../models/Student');
+const Staff = require('../models/Staff');
 const Request = require('../models/Request');
 const qrcode = require('qrcode');
 const { sendEmail } = require('../utils/notifications');
 const { generateCertificate } = require('../utils/pdfGenerator');
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 const dotenv = require('dotenv');
 
 dotenv.config();
-const secret = process.env.SECRET_KEY || 'your-default-secret-key'; // Fallback for safety
+const secret = process.env.SECRET_KEY || 'your-default-secret-key';
 
-// Middleware to verify token
-const authMiddleware = (req, res, next) => {
+// Middleware to verify token and role
+const authMiddleware = async (req, res, next) => {
   const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.status(401).json({ message: 'No token provided' });
 
   try {
     const decoded = jwt.verify(token, secret);
-    req.studentId = decoded.studentId; // Attach studentId to request
+    req.user = decoded; // { id, role, department (if staff) }
     next();
   } catch (err) {
     res.status(401).json({ message: 'Invalid or expired token' });
   }
 };
 
-// Login (email-based)
+// Role-based middleware
+const roleMiddleware = (roles) => (req, res, next) => {
+  if (!roles.includes(req.user.role)) {
+    return res.status(403).json({ message: 'Forbidden: Insufficient permissions' });
+  }
+  next();
+};
+
+// Unified Login
 router.post('/login', async (req, res) => {
-  const { email } = req.body;
-  if (!email) return res.status(400).json({ message: 'Email is required' });
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ message: 'Email and password are required' });
 
   try {
-    const student = await Student.findOne({ email });
-    if (!student) return res.status(404).json({ message: 'Student not found' });
+    let user = await Student.findOne({ email });
+    let role = 'student';
+    if (!user) {
+      user = await Staff.findOne({ email });
+      role = user ? user.role : null;
+    }
+    if (!user) return res.status(404).json({ message: 'User not found' });
 
-    const token = jwt.sign({ studentId: student.studentId }, secret, { expiresIn: '1h' });
-    res.json({ token, studentId: student.studentId });
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) return res.status(401).json({ message: 'Invalid credentials' });
+
+    const token = jwt.sign(
+      { id: role === 'student' ? user.studentId : user._id, role, department: user.department || null },
+      secret,
+      { expiresIn: '1h' }
+    );
+    res.json({ token, role, id: role === 'student' ? user.studentId : user._id });
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
@@ -43,16 +65,17 @@ router.post('/login', async (req, res) => {
 
 // Register Student
 router.post('/register', async (req, res) => {
-  const { studentId, name, email } = req.body;
-  if (!studentId || !name || !email) {
-    return res.status(400).json({ message: 'Student ID, name, and email are required' });
+  const { studentId, name, email, password } = req.body;
+  if (!studentId || !name || !email || !password) {
+    return res.status(400).json({ message: 'All fields are required' });
   }
 
   try {
     const existingStudent = await Student.findOne({ studentId });
     if (existingStudent) return res.status(400).json({ message: 'Student already exists' });
 
-    const student = new Student({ studentId, name, email });
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const student = new Student({ studentId, name, email, password: hashedPassword });
     await student.save();
     res.status(201).json({ message: 'Student registered', student });
   } catch (err) {
@@ -60,10 +83,51 @@ router.post('/register', async (req, res) => {
   }
 });
 
-// Submit Clearance Request (studentId from token)
-router.post('/request', authMiddleware, async (req, res) => {
+// Register Staff (Admin Only)
+router.post('/staff/register', authMiddleware, roleMiddleware(['admin']), async (req, res) => {
+  const { email, department } = req.body;
+  if (!email || !department) return res.status(400).json({ message: 'Email and department are required' });
+
+  try {
+    const existingStaff = await Staff.findOne({ email });
+    if (existingStaff) return res.status(400).json({ message: 'Staff already exists' });
+
+    const defaultPassword = Math.random().toString(36).slice(-8); // Random 8-char password
+    const hashedPassword = await bcrypt.hash(defaultPassword, 10);
+    const staff = new Staff({ email, password: hashedPassword, department, role: 'staff' });
+    await staff.save();
+
+    // Send email with default password (configure sendEmail later)
+    //sendEmail(email, 'Your Staff Account', `Your login credentials: Email: ${email}, Password: ${defaultPassword}`);
+    console.log(email, 'Your Staff Account', `Your login credentials: Email: ${email}, Password: ${defaultPassword}`)
+    res.status(201).json({ message: 'Staff registered', staff });
+  } catch (err) {
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
+// Update Staff Password
+router.put('/staff/password', authMiddleware, roleMiddleware(['staff', 'admin']), async (req, res) => {
+  const { oldPassword, newPassword } = req.body;
+  if (!oldPassword || !newPassword) return res.status(400).json({ message: 'Old and new passwords are required' });
+
+  try {
+    const staff = await Staff.findById(req.user.id);
+    const isMatch = await bcrypt.compare(oldPassword, staff.password);
+    if (!isMatch) return res.status(401).json({ message: 'Incorrect old password' });
+
+    staff.password = await bcrypt.hash(newPassword, 10);
+    await staff.save();
+    res.json({ message: 'Password updated' });
+  } catch (err) {
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
+// Submit Clearance Request (Student Only)
+router.post('/request', authMiddleware, roleMiddleware(['student']), async (req, res) => {
   const { department } = req.body;
-  const studentId = req.studentId; // From token
+  const studentId = req.user.id;
   if (!department) return res.status(400).json({ message: 'Department is required' });
 
   try {
@@ -72,18 +136,15 @@ router.post('/request', authMiddleware, async (req, res) => {
 
     const request = new Request({ studentId, department });
     await request.save();
-
-    // Notify student (commented out for now)
-    // sendEmail(student.email, `${department} Clearance Requested`, 'Your clearance request is pending approval.');
     res.status(201).json({ message: 'Request submitted', request });
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
 
-// Approve/Reject Request (admin route, no studentId needed)
-router.put('/approve/:requestId', authMiddleware, async (req, res) => {
-  const { status } = req.body; // 'approved' or 'rejected'
+// Approve/Reject Request (Staff Only, Department-Specific)
+router.put('/approve/:requestId', authMiddleware, roleMiddleware(['staff', 'admin']), async (req, res) => {
+  const { status } = req.body;
   if (!['approved', 'rejected'].includes(status)) {
     return res.status(400).json({ message: 'Status must be "approved" or "rejected"' });
   }
@@ -91,6 +152,9 @@ router.put('/approve/:requestId', authMiddleware, async (req, res) => {
   try {
     const request = await Request.findById(req.params.requestId);
     if (!request) return res.status(404).json({ message: 'Request not found' });
+    if (req.user.role === 'staff' && req.user.department !== request.department) {
+      return res.status(403).json({ message: 'You can only approve requests for your department' });
+    }
 
     request.status = status;
     await request.save();
@@ -99,10 +163,6 @@ router.put('/approve/:requestId', authMiddleware, async (req, res) => {
     student.clearanceStatus[request.department] = status;
     await student.save();
 
-    // Notify student (commented out)
-    // sendEmail(student.email, `${request.department} Clearance ${status}`, `Your ${request.department} clearance has been ${status}.`);
-
-    // Check if all cleared
     const allCleared = Object.values(student.clearanceStatus).every((s) => s === 'approved');
     if (allCleared) {
       student.certificateGenerated = true;
@@ -117,9 +177,9 @@ router.put('/approve/:requestId', authMiddleware, async (req, res) => {
   }
 });
 
-// Get QR Code (studentId from token)
-router.get('/qr', authMiddleware, async (req, res) => {
-  const studentId = req.studentId; // From token
+// Get QR Code (Student Only)
+router.get('/qr', authMiddleware, roleMiddleware(['student']), async (req, res) => {
+  const studentId = req.user.id;
   try {
     const student = await Student.findOne({ studentId });
     if (!student) return res.status(404).json({ message: 'Student not found' });
@@ -132,9 +192,9 @@ router.get('/qr', authMiddleware, async (req, res) => {
   }
 });
 
-// Get Clearance Status (studentId from token)
-router.get('/status', authMiddleware, async (req, res) => {
-  const studentId = req.studentId; // From token
+// Get Clearance Status (Student Only)
+router.get('/status', authMiddleware, roleMiddleware(['student']), async (req, res) => {
+  const studentId = req.user.id;
   try {
     const student = await Student.findOne({ studentId });
     if (!student) return res.status(404).json({ message: 'Student not found' });
@@ -144,36 +204,31 @@ router.get('/status', authMiddleware, async (req, res) => {
     const status = {};
     const requestsSent = {};
 
-    // Initialize status and requestsSent
     departments.forEach((department) => {
       status[department] = student.clearanceStatus[department] || 'pending';
       requestsSent[department] = false;
     });
 
-    // Update based on requests
     requests.forEach((request) => {
       status[request.department] = request.status;
       requestsSent[request.department] = true;
     });
 
-    res.json({ status, requestsSent, email: student.email }); // Include email for profile
+    res.json({ status, requestsSent, email: student.email });
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
 
-// Get Requests (for admin, optional department filter)
-router.get('/requests', authMiddleware, async (req, res) => {
-  const { department } = req.query;
+// Get Requests (Staff Only, Department-Specific)
+router.get('/requests', authMiddleware, roleMiddleware(['staff', 'admin']), async (req, res) => {
   try {
-    const query = department ? { department } : {};
+    const query = req.user.role === 'staff' ? { department: req.user.department } : {};
     const requests = await Request.find(query);
     res.json(requests);
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
-
-
 
 module.exports = router;
