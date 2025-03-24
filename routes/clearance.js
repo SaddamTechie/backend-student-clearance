@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Student = require('../models/Student');
 const Staff = require('../models/Staff');
+const Report = require('../models/Report');
 const Request = require('../models/Request');
 const qrcode = require('qrcode');
 const { sendEmail } = require('../utils/notifications');
@@ -185,12 +186,13 @@ router.get('/qr', authMiddleware, roleMiddleware(['student']), async (req, res) 
     if (!student) return res.status(404).json({ message: 'Student not found' });
 
     const qrData = JSON.stringify({ studentId, timestamp: Date.now() });
-    const qrCode = await qrcode.toDataURL(qrData);
-    res.json({ qrCode });
+    //const qrCode = await qrcode.toDataURL(qrData);
+    res.json({ qrCode: qrData });
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
+
 
 // Get Clearance Status (Student Only)
 router.get('/status', authMiddleware, roleMiddleware(['student']), async (req, res) => {
@@ -214,7 +216,7 @@ router.get('/status', authMiddleware, roleMiddleware(['student']), async (req, r
       requestsSent[request.department] = true;
     });
 
-    res.json({ status, requestsSent, email: student.email });
+    res.json({ status, requestsSent, email: student.email ,studentId: studentId});
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
@@ -230,5 +232,111 @@ router.get('/requests', authMiddleware, roleMiddleware(['staff', 'admin']), asyn
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
+
+
+// Post Report 
+router.post('/report', authMiddleware, async (req, res) => {
+  const { department, message } = req.body;
+  const studentId = req.user.id;
+
+  if (!department || !message) {
+    return res.status(400).json({ message: 'Department and message are required' });
+  }
+
+  try {
+    const report = new Report({
+      studentId,
+      department,
+      message,
+    });
+    await report.save();
+    console.log(`Report from student ${studentId} to ${department}: ${message}`);
+    res.status(201).json({ message: 'Report submitted successfully' });
+  } catch (error) {
+    console.error('Error saving report:', error);
+    res.status(500).json({ message: 'Failed to submit report' });
+  }
+});
+
+
+
+router.get('/reports', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'staff') {
+    return res.status(403).json({ message: 'Unauthorized' });
+  }
+  const department = req.user.department; // From token
+  try {
+    const reports = await Report.find({ department }).sort({ createdAt: -1 });
+    res.json(reports);
+  } catch (error) {
+    console.error('Error fetching reports:', error);
+    res.status(500).json({ message: 'Failed to fetch reports' });
+  }
+});
+
+
+router.patch('/report/:id', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'staff') {
+    return res.status(403).json({ message: 'Unauthorized' });
+  }
+  const { id } = req.params;
+  const { status } = req.body;
+  const staffDepartment = req.user.department;
+
+  if (!['pending', 'resolved'].includes(status)) {
+    return res.status(400).json({ message: 'Invalid status' });
+  }
+
+  try {
+    const report = await Report.findById(id);
+    if (!report) return res.status(404).json({ message: 'Report not found' });
+    if (report.department !== staffDepartment) {
+      return res.status(403).json({ message: 'You can only update reports in your department' });
+    }
+    report.status = status;
+    await report.save();
+    res.json(report);
+  } catch (error) {
+    console.error('Error updating report:', error);
+    res.status(500).json({ message: 'Failed to update report' });
+  }
+});
+
+
+router.post('/verify', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'staff') {
+    return res.status(403).json({ message: 'Unauthorized' });
+  }
+  const { id } = req.body; // Scanned student ID from QR
+  if (!id) {
+    return res.status(400).json({ message: 'Student ID required' });
+  }
+
+  try {
+    const clearance = await Request.findOne({ studentId: id });
+    if (!clearance) {
+      console.log('Student Req not found');
+      return res.status(404).json({ message: 'Student not found' });
+    }
+    const student = await Student.findOne({ studentId: id });
+    if (!student) {
+      console.log('Student not found');
+      return res.status(404).json({ message: 'Student not found' });
+    }
+    // Return clearance status for the staff's department
+    const departmentStatus = student.clearanceStatus.get(req.user.department) || 'pending';
+    res.json({
+      studentId: id,
+      email: student.email,
+      department: req.user.department,
+      status: departmentStatus,
+    });
+  } catch (error) {
+    console.error('Error verifying student:', error);
+    res.status(500).json({ message: 'Failed to verify student' });
+  }
+});
+
+
 
 module.exports = router;
